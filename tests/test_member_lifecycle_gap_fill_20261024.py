@@ -79,14 +79,24 @@ def test_region_refresh_gating_and_dry_run() -> None:
 
 
 def test_region_routes_registered_before_detail() -> None:
-    order = [r.path for r in crm.router.routes]
-    detail_idx = order.index("/admin/matchmaker/members/{member_id}")
+    # 同一路径存在多条路由（`DELETE /members/{member_id}` 单条软删 与 `GET /members/{member_id}` 详情），
+    # 必须按 method 精确定位 GET 详情：DELETE 定义在属地路由之前，但它与 GET 的静态路径不存在匹配冲突，
+    # 若按纯路径取索引会误判（回归测试自身缺陷，非路由顺序问题）。
+    routes = list(crm.router.routes)
+
+    def _index(path: str, method: str) -> int:
+        for position, route in enumerate(routes):
+            if route.path == path and method in getattr(route, "methods", set()):
+                return position
+        raise AssertionError(f"路由未注册：{method} {path}")
+
+    detail_idx = _index("/admin/matchmaker/members/{member_id}", "GET")
     for static in (
         "/admin/matchmaker/members/region-resolver",
         "/admin/matchmaker/members/refresh-ip-region",
         "/admin/matchmaker/members/refresh-phone-region",
     ):
-        assert static in order and order.index(static) < detail_idx
+        assert _index(static, "GET" if "resolver" in static else "POST") < detail_idx
 
 
 def test_config_region_provider_default_disabled() -> None:
