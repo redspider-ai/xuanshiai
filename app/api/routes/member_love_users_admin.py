@@ -3,18 +3,28 @@
 语义与 ``DELETE /admin/matchmaker/members/{id}`` 完全一致：按 user_id 软删
 ``users.deleted_at`` + 写审计日志，敏感写同样要求 ``confirm=true`` + Idempotency-Key。
 新增本路由只为补齐前端路径，不引入第二套删除逻辑。
+
+权限靠 ``@declare_permission`` 显式声明：``matchmaker.member.manage`` 在鉴权依赖里是按 URL
+里的 ``/members`` 子串推导的，而本路径是 ``/admin/love-users/…``，命中不了映射；未命中又
+未声明时鉴权是 fail-closed 的，整个端点会对所有账号恒返回 403（D-5 回归拦下的就是这个）。
 """
 
 from fastapi import APIRouter, Depends, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_admin, require_sensitive_operation
+from app.api.dependencies import (
+    CurrentMatchmakerAdmin,
+    declare_permission,
+    get_current_matchmaker_admin,
+    require_sensitive_operation,
+)
 from app.api.routes.matchmaker_crm_admin import MemberDeleteResult, member_delete
 from app.db.session import get_db
 
 router = APIRouter(prefix="/admin/love-users")
 
 
+@declare_permission("matchmaker.member.manage")
 @router.delete(
     "/{member_id}",
     response_model=MemberDeleteResult,

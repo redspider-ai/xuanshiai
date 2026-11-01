@@ -161,6 +161,8 @@ Authorization: Bearer <access-token>
 
 返回数组 `[{value, label, count}]`：`value` 为原始 `source` 值（为空归一化为 `""`），`label` 为展示文案（空值显示「未填写来源」），`count` 为该来源会员数。口径按 `scope_exists_clause` 收口；`users.source` 列缺失时返回空数组，其余统计字段不受影响。前端概览页「会员登记来源占比」可直取该字段，替代此前并发多次列表倒推。
 
+**人群口径（2026-11-01 定案）**：`total` 与 `source_distribution` 同用一条人群条件——数据范围内、排除软删（`users.deleted_at IS NULL`，与列表页一致）、**不限 `status`**（禁用/弃海仍算会员）。因此 `sum(source_distribution[].count) == total`，占比恒凑满 100%；不得再给分布单独加 `status = 1`，否则会出现「登记总数 33 / 来源相加 20」两个分母。
+
 ### B10 会员详情 tags 放宽
 
 `GET /admin/matchmaker/members/{member_id}` 的 `MemberDetail.tags` 类型放宽为 `dict[str, Any] | list[Any] | str | null`。历史脏数据（如 `{"custom_categories": {}}`，值为非列表）不再触发 pydantic 校验异常导致整个详情 500；非法 JSON 统一归一化为 `null`。
@@ -201,6 +203,7 @@ Content-Type: application/json
 - 2026-10-24（A12-属地刷新）：新增 `GET /members/region-resolver`、`POST /members/refresh-ip-region`、`POST /members/refresh-phone-region`（provider 门控骨架，缺省 `disabled`→`503`，未接真实厂商，不写库）。契约见 `docs/api/一键刷新属地接口-2026-10-24.md`。
 - 2026-10-24（A12-钱包 balance）：`GET /admin/matchmaker/members` 与详情出参新增 `balance`（平台余额，取 `account_ledger` 中 `account_type='user'`、`state='AVAILABLE'` 的 CREDIT−DEBIT，与 `finance.get_balance` 同口径），相关子查询、不新建表；`sort_by` 白名单新增 `balance`。只读、向后兼容。余额发放/扣减与用户钱包视图见 `docs/api/钱包余额调整接口-2026-10-24.md`。
 - 2026-10-24（A12-属地 ip_region/phone_region）：`users` 新增 `ip_region` / `phone_region`（varchar(64) 可空，迁移 `migrations/user_region/20261024_01`，含 up/down/verify）；列表与详情按 `user_expr` 缺列降级输出两字段（迁移未执行为 `null`）。本轮仅补列+展示，不接 IP→属地批量解析（`ip_location` 仍为原始注册 IP）。向后兼容。
+- 2026-11-01（统计口径对齐）：`GET /admin/matchmaker/members/statistics` 的 `total` 及全部状态计数、`source_distribution` 统一拼 `users.deleted_at IS NULL`（此前不排软删，导致列表 31 / 统计 33），并去掉来源分布上的 `status = 1`；`users.deleted_at` 为补列项，未跑迁移时与列表页一起不拼。向后兼容：仅数值口径变化，无字段增删。
 - 2026-10-24（A12-补列 login_num）：`users` 新增 `login_num`（累计登录次数，int 默认 0，迁移 `migrations/user_login_num/20261024_01`，含 up/down/verify）；登录链路（手机验证码 / 微信 / 测试密码）经 `touch_login` 在列存在时自增、缺列时静默跳过；`GET /admin/matchmaker/members` 与详情出参新增 `login_num`（缺列降级 `null`），`sort_by` 白名单新增 `login_num`（缺列时回落默认排序不报错）。向后兼容：旧客户端忽略新字段即可。
 - 2026-10-24（A12-列表补字段）：`GET /admin/matchmaker/members` 与会员详情的 `MemberListItem`/`MemberDetail` 出参新增 `points`（积分余额，取 `user_points` 最新一条 `balance`，无流水为 `0`）。`last_login_at`/`ip_location` 已于同日 B8/A12 补出（列已存在）。均为只读、向后兼容，无补列/新表。
 - 2026-10-24（缺口补全）：`GET /admin/matchmaker/members` 新增 `auth_status`（多值，B6）、`source__is_null`（B5）、`activity_id`（B0）、`weight_min/max`（B9）、`next_follow_start/end`（A15）；`MemberListItem` 出参补 `real_name/weight/tags/last_login_at/ip_location`（B8/A12）；`/statistics` 补 `source_distribution`（B5/A11）；`MemberDetail.tags` 放宽类型修复脏数据 500（B10）；兼容层 `getAdminIndexStatistic` 修复 `maleNums/femaleNums`（B7）；新增批量弃海 `POST /admin/members/batch-abandon`（A18）。全部向后兼容。

@@ -117,8 +117,14 @@ async def dashboard(db: AsyncSession, admin: CurrentMatchmakerAdmin, from_date: 
     matchmaker_scope, _ = _scope_condition(admin, "user_matchmaker_apply.user_id")
     lead_scope, _ = _lead_scope_condition(admin)
     row = (await db.execute(text(f"""SELECT
-        (SELECT COUNT(*) FROM users WHERE {user_scope}) member_count,
-        (SELECT COUNT(*) FROM users WHERE deleted_at IS NULL AND {user_scope}) platform_user_count,
+        -- 概览「会员」口径（2026-11-01 与项目负责人定案）：会员 = users 排除软删 deleted_at IS NULL，
+        -- 不限 status（禁用/弃海仍算会员，与会员 CRM 列表页同一人群）。
+        -- 会员总数、男女占比、来源占比、会员增长趋势必须同用这一条，否则概览页几个环形图
+        -- 的分母会互相打架（曾出现登记总数 33 / 男女相加 32 / 列表 31 三个数）。
+        (SELECT COUNT(*) FROM users WHERE deleted_at IS NULL AND {user_scope}) member_count,
+        -- 平台用户是「平台累计注册」口径，含后台已删除账号；会员总数不含。两者相减即被删
+        -- 会员数，属刻意不同口径（2026-11-01 定案：平台用户 33 / 会员总数 31），勿改成一致。
+        (SELECT COUNT(*) FROM users WHERE {user_scope}) platform_user_count,
         (SELECT COUNT(*) FROM users WHERE status = 1 AND openid IS NOT NULL AND openid <> '' AND {user_scope}) wechat_fan_count,
         (SELECT COUNT(DISTINCT DATE(last_login_at)) FROM users WHERE status = 1 AND last_login_at IS NOT NULL AND {user_scope}) online_days,
         (SELECT COUNT(*) FROM customer_lead WHERE deleted_at IS NULL AND {lead_scope}) lead_count,
@@ -130,8 +136,8 @@ async def dashboard(db: AsyncSession, admin: CurrentMatchmakerAdmin, from_date: 
         (SELECT COUNT(*) FROM user_matchmaker_apply WHERE application_type = 'service_matchmaker' AND status = 1 AND {matchmaker_scope}) service_matchmaker_count,
         (SELECT COUNT(*) FROM user_matchmaker_apply WHERE application_type = 'promoter' AND status = 1 AND {matchmaker_scope}) promotion_matchmaker_count,
         (SELECT COUNT(*) FROM user_match matched_user WHERE matched_user.status IN (1, 2) AND matched_user.user_id < matched_user.target_user_id AND {user_scope.replace('users.id', 'matched_user.user_id')}) successful_match_count,
-        (SELECT COUNT(*) FROM users WHERE gender = 1 AND {user_scope}) male_member_count,
-        (SELECT COUNT(*) FROM users WHERE gender = 2 AND {user_scope}) female_member_count,
+        (SELECT COUNT(*) FROM users WHERE deleted_at IS NULL AND gender = 1 AND {user_scope}) male_member_count,
+        (SELECT COUNT(*) FROM users WHERE deleted_at IS NULL AND gender = 2 AND {user_scope}) female_member_count,
         (SELECT COUNT(*) FROM withdrawal_request WHERE status = 'PENDING_REVIEW' AND account_type = 'user' AND {withdrawal_scope}) pending_withdrawal_count,
         (SELECT COALESCE(SUM(amount), 0) FROM payment_order WHERE status = 1 AND (product_type IS NULL OR product_type <> 'offline_vip') AND {order_scope}) online_income,
         (SELECT COALESCE(SUM(amount), 0) FROM payment_order WHERE status = 1 AND product_type = 'offline_vip' AND {order_scope}) offline_income"""), scope_params)).mappings().one()
@@ -155,7 +161,7 @@ async def dashboard(db: AsyncSession, admin: CurrentMatchmakerAdmin, from_date: 
     end = datetime.combine(to_date + timedelta(days=1), time.min)
     rows = (await db.execute(text(f"""SELECT DATE(d) date, SUM(member_count) member_count, SUM(lead_count) lead_count,
         SUM(paid_count) paid_count, SUM(refund_count) refund_count, SUM(paid_amount) paid_amount, SUM(online_paid_amount) online_paid_amount, SUM(offline_paid_amount) offline_paid_amount, SUM(refund_amount) refund_amount FROM (
-          SELECT DATE(created_at) d, COUNT(*) member_count, 0 lead_count, 0 paid_count, 0 refund_count, 0 paid_amount, 0 online_paid_amount, 0 offline_paid_amount, 0 refund_amount FROM users WHERE created_at >= :start AND created_at < :end AND {user_scope} GROUP BY DATE(created_at)
+          SELECT DATE(created_at) d, COUNT(*) member_count, 0 lead_count, 0 paid_count, 0 refund_count, 0 paid_amount, 0 online_paid_amount, 0 offline_paid_amount, 0 refund_amount FROM users WHERE deleted_at IS NULL AND created_at >= :start AND created_at < :end AND {user_scope} GROUP BY DATE(created_at)
           UNION ALL SELECT DATE(created_at) d, 0, COUNT(*), 0, 0, 0, 0, 0, 0 FROM customer_lead WHERE deleted_at IS NULL AND created_at >= :start AND created_at < :end AND {lead_scope} GROUP BY DATE(created_at)
           UNION ALL SELECT DATE(pay_time) d, 0, 0, COUNT(*), 0, COALESCE(SUM(amount), 0), COALESCE(SUM(CASE WHEN product_type IS NULL OR product_type <> 'offline_vip' THEN amount ELSE 0 END), 0), COALESCE(SUM(CASE WHEN product_type = 'offline_vip' THEN amount ELSE 0 END), 0), 0 FROM payment_order WHERE status IN (1, 3) AND pay_time >= :start AND pay_time < :end AND {order_scope} GROUP BY DATE(pay_time)
           UNION ALL SELECT DATE(refund_time) d, 0, 0, 0, COUNT(*), 0, 0, 0, COALESCE(SUM(amount), 0) FROM payment_order WHERE status = 3 AND refund_time >= :start AND refund_time < :end AND {order_scope} GROUP BY DATE(refund_time)

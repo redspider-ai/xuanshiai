@@ -620,6 +620,10 @@ async def members(
 async def member_statistics(current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin), db: AsyncSession = Depends(get_db)) -> MemberStatistics:
     params: dict[str, object] = {}
     scope = current.scope_exists_clause(params, correlation="scope_assignment.user_id = u.id")
+    # 口径与会员 CRM 列表页严格一致：列表拼了 ``u.deleted_at IS NULL``（A12 会员软删），
+    # 统计不拼就会出现「列表 31 / 统计 33」；列缺失（未跑迁移）时两处一起不拼。
+    available = await _available_columns(db)
+    alive = " AND u.deleted_at IS NULL" if ("users", "deleted_at") in available else ""
     # VIP 子查询必须同口径收口：历史实现统计全平台 VIP，会向门店/组织账号泄露全局规模。
     vip_scope = current.scope_exists_clause(
         params,
@@ -646,17 +650,17 @@ async def member_statistics(current: CurrentMatchmakerAdmin = Depends(get_curren
         FROM users u
         LEFT JOIN {_ASSIGNMENT_DISPLAY_DERIVED} a ON a.user_id = u.id
         LEFT JOIN (SELECT user_id, MAX(created_at) last_follow_at, MAX(next_follow_at) next_follow_at FROM member_follow_up GROUP BY user_id) f ON f.user_id = u.id
-        WHERE ({scope})"""), params)).mappings().one()
+        WHERE ({scope}){alive}"""), params)).mappings().one()
     # B5/A11：来源分布（含未填写一档）。users.source 列缺失时降级为空列表，
-    # 不影响其余统计字段；前端可回退到“会员总数－已归类”兑底。
-    # 口径与页面「登记总数」（status=1 有效会员）对齐：不限状态时分母会把禁用/弃海
-    # 账号算进去，占比永远凑不满 100%（2026-11-01 概览页 5/33=15% 而总数显示 20）。
+    # 不影响其余统计字段；前端可回退到“会员总数－已归类”兜底。
+    # 口径：与 total 同人群（范围内、排除软删、不限 status），两边分母必须相等，
+    # 否则概览环形图会出现「登记总数 33 / 各来源相加 20」这种凑不满 100% 的展示。
     source_distribution: list[SourceDistributionItem] = []
-    if ("users", "source") in await _available_columns(db):
+    if ("users", "source") in available:
         dist_rows = (await db.execute(text(f"""SELECT COALESCE(NULLIF(u.source, ''), '') AS value, COUNT(*) count
             FROM users u
             LEFT JOIN {_ASSIGNMENT_DISPLAY_DERIVED} scope_dummy ON scope_dummy.user_id = u.id
-            WHERE ({scope}) AND u.status = 1 GROUP BY value ORDER BY count DESC, value"""), params)).mappings().all()
+            WHERE ({scope}){alive} GROUP BY value ORDER BY count DESC, value"""), params)).mappings().all()
         source_distribution = [
             SourceDistributionItem(value=str(item["value"]), label=str(item["value"]) or "未填写来源", count=int(item["count"] or 0))
             for item in dist_rows

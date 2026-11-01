@@ -262,11 +262,12 @@ async def test_member_list_returns_nothing_for_unbound_account() -> None:
 @pytest.mark.asyncio
 async def test_member_statistics_scopes_vip_subquery() -> None:
     keys = ("total", "male", "female", "vip", "active", "unassigned", "never_followed", "follow_due_today", "abandoned")
-    db = StubDB([StubResult(one={key: 0 for key in keys})])
+    # 首条先被 _available_columns 吃掉（deleted_at / source 都是补列项，先探测再拼 SQL）。
+    db = StubDB([StubResult(rows=[]), StubResult(one={key: 0 for key in keys})])
     stats = await crm.member_statistics(current=_admin("STORE"), db=db)
     assert stats.total == 0
     assert stats.abandoned == 0
-    assert db.statements[0][1].get("scope_store_id") == ORGANIZATION_ID
+    assert db.statements[1][1].get("scope_store_id") == ORGANIZATION_ID
     # VIP 子查询必须使用独立别名同口径收口，禁止统计全平台 VIP。
     assert "vip_scope_assignment.user_id = vm.user_id" in db.sql()
     # 弃海计数同样必须收口到账号数据范围（A9/B3）。

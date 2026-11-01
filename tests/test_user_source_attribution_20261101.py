@@ -9,7 +9,7 @@
 - auth：手机号注册写「自己注册」；users.source 缺列时静默不写（不能挡住注册）；
   微信注册分支同口径；``_render_user_insert`` 列数与取值位数不匹配时直接抛错；
 - 线索入库：admin 侧与红娘工作台侧生成的账号标「线索入库」；
-- 统计：source_distribution 的 SQL 必须限定 status=1；
+- 统计：source_distribution 与会员总数同人群（排除软删、不限 status）；
 - 全项目守卫：禁止再出现 ``VALUES (:{', '.join(...)})`` 这种只给首列加冒号的写法。
 
 无真实 DB：全部走记录型桩。
@@ -26,6 +26,7 @@ import pytest
 from app.api.dependencies import CurrentMatchmakerAdmin
 from app.api.routes import matchmaker_crm_admin as crm
 from app.schemas.matchmaker_admin import MatchmakerAdminAccount
+from app.services import admin_home as admin_home_service
 from app.services import auth as auth_service
 from app.services import customer_lead_admin as lead_service
 from app.services import matchmaker_workspace as workspace_service
@@ -228,22 +229,63 @@ def test_workspace_source_probe_is_shared_not_duplicated() -> None:
 
 
 @pytest.mark.asyncio
-async def test_source_distribution_counts_only_active_members() -> None:
+async def test_source_distribution_shares_member_total_population() -> None:
+    """来源分布必须与会员统计同一人群：排除软删、不限 status。
+
+    2026-11-01 定案。之前先拿 status=1 做分母、又拿全量做总数，概览页同时出现
+    「登记总数 33 / 男女相加 32 / 来源相加 20」三个互不相等的数。
+    """
     keys = ("total", "male", "female", "vip", "active", "unassigned",
             "never_followed", "follow_due_today", "abandoned")
     db = _StubDb([
+        # _available_columns 现在先于主查询执行（两处 SQL 都要靠它判定 deleted_at）。
+        _Result(rows=[("users", "source"), ("users", "deleted_at")]),
         _Result(one={key: 0 for key in keys}),
-        _Result(rows=[("users", "source")]),
         _Result(rows=[]),
     ])
 
     stats = await crm.member_statistics(current=_admin("STORE"), db=db)
 
     assert stats.source_distribution == []
+    total_sql = db.statements[1][0]
     dist_sql = db.statements[-1][0]
     assert "GROUP BY value" in dist_sql, "取到的不是来源分布 SQL"
-    # 分母必须与页面「登记总数」（有效会员）同口径，否则占比永远凑不满 100%。
-    assert "u.status = 1" in dist_sql
+    for name, sql in (("total", total_sql), ("distribution", dist_sql)):
+        assert "u.deleted_at IS NULL" in sql, f"{name} 未排除软删会员"
+        # 允许 SUM(u.status = 1) active 这类指标列，但不能拿它当人群过滤条件。
+        assert "AND u.status = 1" not in sql, f"{name} 不应按有效会员过滤（与列表页口径不一致）"
+
+
+def _metric_line(src: str, name: str) -> str:
+    matches = [line for line in src.splitlines() if line.strip().endswith(f") {name},")]
+    assert matches, f"未找到 {name} 的统计 SQL 行"
+    return matches[0]
+
+
+def test_dashboard_member_metrics_exclude_soft_deleted() -> None:
+    """概览的会员总数/男女必须与会员列表同人群（排除软删、不限 status）。
+
+    否则同一页面会同时出现三个互不相等的分母：登记总数 33（全表）、
+    男女相加 32（1 个未填性别）、来源相加 20（status=1）。
+    """
+    src = inspect.getsource(admin_home_service.dashboard)
+    for name in ("member_count", "male_member_count", "female_member_count"):
+        line = _metric_line(src, name)
+        assert "deleted_at IS NULL" in line, f"{name} 未排除软删会员：{line}"
+        assert "status = 1" not in line, f"{name} 不应限定 status=1：{line}"
+
+
+def test_dashboard_platform_user_count_includes_soft_deleted() -> None:
+    """「平台用户」是累计注册口径，必须含已删除账号（2026-11-01 定案：33 vs 31）。
+
+    它与会员总数是两个不同指标，不是漏加过滤；曾经两边都拼 deleted_at 导致两卡同值，
+    于是「删了多少会员」在概览上看不出来。锁住防止后续被「统一口径」改回去。
+    """
+    src = inspect.getsource(admin_home_service.dashboard)
+    platform_line = _metric_line(src, "platform_user_count")
+    member_line = _metric_line(src, "member_count")
+    assert "deleted_at" not in platform_line, f"平台用户不应排除软删：{platform_line}"
+    assert "deleted_at IS NULL" in member_line, "会员总数必须排除软删"
 
 
 # --------------------------------------------------------------------- 全项目守卫
