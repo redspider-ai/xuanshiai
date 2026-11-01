@@ -66,8 +66,10 @@ class Settings(BaseSettings):
     wechat_pay_notify_url: str | None = None
     wechat_pay_refund_notify_url: str | None = None
     # 公钥模式（与平台证书模式二选一）：配置后不再下载平台证书。
+    # 公钥内联或只读文件路径二选一；同时配置时以内联值为准。
     wechat_pay_public_key_id: str | None = None
     wechat_pay_public_key: SecretStr | None = None
+    wechat_pay_public_key_path: str | None = None
     wechat_pay_timeout_seconds: float = Field(default=10, gt=0, le=60)
     wechat_pay_max_clock_skew_seconds: int = Field(default=300, ge=0, le=3600)
 
@@ -519,11 +521,23 @@ class Settings(BaseSettings):
             raise ValueError(f"无法读取 WECHAT_PAY_PRIVATE_KEY_PATH：{path}") from exc
 
     def wechat_pay_public_key_pem(self) -> str | None:
-        """读取微信支付公钥 PEM（公钥模式）。"""
-        if self.wechat_pay_public_key is None:
+        """读取微信支付公钥 PEM（公钥模式）。
+
+        优先使用 ``WECHAT_PAY_PUBLIC_KEY`` 内联值；未配置时读取只读文件
+        ``WECHAT_PAY_PUBLIC_KEY_PATH``。
+        """
+        if self.wechat_pay_public_key is not None:
+            value = self.wechat_pay_public_key.get_secret_value().strip()
+            if value:
+                return value
+        path = (self.wechat_pay_public_key_path or "").strip()
+        if not path:
             return None
-        value = self.wechat_pay_public_key.get_secret_value().strip()
-        return value or None
+        try:
+            with open(path, encoding="utf-8") as handle:
+                return handle.read().strip() or None
+        except OSError as exc:
+            raise ValueError(f"无法读取 WECHAT_PAY_PUBLIC_KEY_PATH：{path}") from exc
 
     def _validate_wechat_pay_gateway(self) -> None:
         """校验微信支付 APIv3 网关配置。
