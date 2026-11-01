@@ -1460,6 +1460,7 @@ BUSINESS_TABLES = {
             `like_count` int NOT NULL DEFAULT 0,
             `ip` varchar(64) DEFAULT NULL,
             `audit_status` varchar(16) NOT NULL DEFAULT 'pending' COMMENT 'pending/approved/rejected',
+            `admin_reply` varchar(500) DEFAULT NULL COMMENT '红娘/后台回复内容',
             `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
             `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             PRIMARY KEY (`id`),

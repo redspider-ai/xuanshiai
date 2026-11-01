@@ -163,6 +163,7 @@ class VideoCommentItem(BaseModel):
     like_count: int = 0
     ip: str | None = None
     audit_status: str = "pending"
+    admin_reply: str | None = None
     created_at: datetime | None = None
 
 
@@ -177,6 +178,7 @@ class VideoCommentPage(BaseModel):
 class VideoCommentUpdate(BaseModel):
     content: str | None = Field(default=None, max_length=500)
     audit_status: AuditStatus | None = None
+    admin_reply: str | None = Field(default=None, max_length=500)
 
     @model_validator(mode="after")
     def require_update(self) -> "VideoCommentUpdate":

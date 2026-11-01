@@ -323,6 +323,7 @@ def _comment_item(row: Any) -> VideoCommentItem:
         like_count=int(m.get("like_count") or 0),
         ip=m.get("ip"),
         audit_status=m.get("audit_status") or "pending",
+        admin_reply=m.get("admin_reply"),
         created_at=m.get("created_at"),
     )
 
