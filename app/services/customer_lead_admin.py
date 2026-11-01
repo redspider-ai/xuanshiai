@@ -67,11 +67,16 @@ _LEAD_PROFILE_COLUMNS: tuple[str, ...] = (
 def _named_placeholders(columns: "list[str] | tuple[str, ...]") -> str:
     """把列名列表渲染成 ``:col, :col`` 形式的命名占位符。
 
-    必须逐列加冒号：写成 ``f"VALUES (:{', '.join(cols)})"`` 只会给第一列加冒号，
-    其余列退化成裸列名，MySQL 会当作同表列引用（新行里为 NULL），于是校验通过、
-    写入成功、但除首列外全部丢值——这类假成功极难从响应里看出来。
+    必须逐列加冒号（在推导式内部拼）：若把冒号留在 join 表达式外面，只有第一列
+    拿到占位符，其余列退化成裸列名，MySQL 会当作同表列引用（新行里为 NULL），于是
+    校验通过、写入成功、但除首列外全部丢值——这类假成功极难从响应里看出来。
+    （静态守卫见 tests/test_user_source_attribution_20261101.py，勿在此写反例字面量。）
     """
     return ", ".join(f":{col}" for col in columns)
+
+
+# 客源入库生成的账号，users.source 标「线索入库」（字典见 migrations/filters/20261011）。
+SOURCE_FROM_LEAD = "线索入库"
 
 
 def _lead_select_for(columns: frozenset[str]) -> str:
@@ -313,11 +318,22 @@ async def convert_lead(
     target_organization_id = lead.organization_id or organization_id
     target_matchmaker_id = lead.matchmaker_id or matchmaker_user_id
     try:
-        result = await db.execute(text("""INSERT INTO users
-            (openid, phone, phone_verified_at, nickname, gender, status, data_complete_rate, register_ip)
-            VALUES (:openid, :phone, UTC_TIMESTAMP(), :nickname, :gender, 1, 0, '127.0.0.1')"""), {
-            "openid": f"lead-convert-{lead_id}", "phone": phone, "nickname": lead.name, "gender": request.gender,
-        })
+        user_columns = ["openid", "phone", "phone_verified_at", "nickname", "gender",
+                        "status", "data_complete_rate", "register_ip"]
+        user_values = [":openid", ":phone", "UTC_TIMESTAMP()", ":nickname", ":gender", "1", "0", "'127.0.0.1'"]
+        user_payload: dict[str, Any] = {
+            "openid": f"lead-convert-{lead_id}", "phone": phone,
+            "nickname": lead.name, "gender": request.gender,
+        }
+        # 与后台建档（后台添加）、自助注册（自己注册）区分；users.source 未迁移时静默不写。
+        if "source" in await _table_columns(db, "users"):
+            user_columns.append("source")
+            user_values.append(":source")
+            user_payload["source"] = SOURCE_FROM_LEAD
+        result = await db.execute(
+            text(f"INSERT INTO users ({', '.join(user_columns)}) VALUES ({', '.join(user_values)})"),
+            user_payload,
+        )
         user_id = int(result.lastrowid)
         await ensure_default_user_role(db, user_id)
         # 客源「本人资料」搬运到新账号（对标站建档即带资料）：user_profile / user_auth 走 upsert，

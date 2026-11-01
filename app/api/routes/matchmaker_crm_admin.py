@@ -635,12 +635,14 @@ async def member_statistics(current: CurrentMatchmakerAdmin = Depends(get_curren
         WHERE ({scope})"""), params)).mappings().one()
     # B5/A11：来源分布（含未填写一档）。users.source 列缺失时降级为空列表，
     # 不影响其余统计字段；前端可回退到“会员总数－已归类”兑底。
+    # 口径与页面「登记总数」（status=1 有效会员）对齐：不限状态时分母会把禁用/弃海
+    # 账号算进去，占比永远凑不满 100%（2026-11-01 概览页 5/33=15% 而总数显示 20）。
     source_distribution: list[SourceDistributionItem] = []
     if ("users", "source") in await _available_columns(db):
         dist_rows = (await db.execute(text(f"""SELECT COALESCE(NULLIF(u.source, ''), '') AS value, COUNT(*) count
             FROM users u
             LEFT JOIN {_ASSIGNMENT_DISPLAY_DERIVED} scope_dummy ON scope_dummy.user_id = u.id
-            WHERE ({scope}) GROUP BY value ORDER BY count DESC, value"""), params)).mappings().all()
+            WHERE ({scope}) AND u.status = 1 GROUP BY value ORDER BY count DESC, value"""), params)).mappings().all()
         source_distribution = [
             SourceDistributionItem(value=str(item["value"]), label=str(item["value"]) or "未填写来源", count=int(item["count"] or 0))
             for item in dist_rows

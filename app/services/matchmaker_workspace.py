@@ -7,6 +7,7 @@ from datetime import date
 import base64
 import json
 from secrets import token_urlsafe
+from typing import Any
 
 import httpx
 from fastapi import HTTPException
@@ -898,18 +899,25 @@ async def convert_workspace_lead(
         raise HTTPException(409, detail="线索未登记手机号，无法生成账号，请先补充电话")
     review_status = "PENDING"
     async with db.begin_nested():
+        user_columns = ["openid", "phone", "phone_verified_at", "nickname", "gender",
+                        "status", "data_complete_rate", "register_ip"]
+        user_values = [":openid", ":phone", "UTC_TIMESTAMP()", ":nickname", ":gender", "1", "0", "'127.0.0.1'"]
+        user_payload: dict[str, Any] = {
+            "openid": f"lead-convert-{lead_id}",
+            "phone": lead.phone,
+            "nickname": lead.name,
+            "gender": request.gender,
+        }
+        # 入库账号标「线索入库」（与后台建档/自助注册区分）；users.source 未迁移时静默不写。
+        if await _users_has_source(db):
+            user_columns.append("source")
+            user_values.append(":source")
+            user_payload["source"] = SOURCE_FROM_LEAD
         result = await db.execute(
             text(
-                """INSERT INTO users
-                (openid, phone, phone_verified_at, nickname, gender, status, data_complete_rate, register_ip)
-                VALUES (:openid, :phone, UTC_TIMESTAMP(), :nickname, :gender, 1, 0, '127.0.0.1')"""
+                f"INSERT INTO users ({', '.join(user_columns)}) VALUES ({', '.join(user_values)})"
             ),
-            {
-                "openid": f"lead-convert-{lead_id}",
-                "phone": lead.phone,
-                "nickname": lead.name,
-                "gender": request.gender,
-            },
+            user_payload,
         )
         user_id = int(result.lastrowid)
         await db.execute(
@@ -1958,6 +1966,17 @@ async def create_promoter_code(db: AsyncSession, current: CurrentUser) -> Promot
 
 NEWLINE = chr(10)
 
+# users.source（会员登记来源）字典档位，见 migrations/filters/20261011_01 列注释。
+SOURCE_FROM_LEAD = "线索入库"
+SOURCE_MATCHMAKER_ENTRY = "红娘录入"
+
+
+async def _users_has_source(db: AsyncSession) -> bool:
+    """users.source 属 20261011 补列项：未迁移的环境探测不到该列时静默不写。"""
+    return bool((await db.execute(text("""SELECT 1 FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'
+        AND COLUMN_NAME = 'source'"""))).first())
+
 
 async def create_workspace_member(
     db: AsyncSession, current: CurrentUser, body: WorkspaceMemberEntryCreate
@@ -1971,6 +1990,9 @@ async def create_workspace_member(
     remark = values.pop("remark", None)
     user_values = {key: values.pop(key) for key in ("phone", "nickname", "gender", "birthday", "is_married") if key in values}
     user_values["status"] = 1
+    # 红娘工作台录入的会员标「红娘录入」，与自助注册/后台添加/线索入库区分。
+    if await _users_has_source(db):
+        user_values["source"] = SOURCE_MATCHMAKER_ENTRY
     auth_values = {key: values.pop(key) for key in ("education", "job", "real_name") if key in values}
     if "tags" in values and values["tags"]:
         values["tags"] = json.dumps({"custom": [t for t in str(values["tags"]).split("|") if t]}, ensure_ascii=False)

@@ -312,6 +312,29 @@ async def create_session(
             "user_id": user_id}
 
 
+# users.source（会员登记来源：后台添加/红娘录入/批量导入/自己注册/落地页/父母登记/线索入库/…）
+# 属 20261011 补列项。注册是核心入口，迁移未执行的环境探测不到该列时静默不写，
+# 不能让一句 Unknown column 把新用户挡在门外。
+SOURCE_SELF_REGISTER = "自己注册"
+
+
+async def _users_columns(db: AsyncSession) -> frozenset[str]:
+    rows = await db.execute(text("""SELECT COLUMN_NAME FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'"""))
+    return frozenset(row[0] for row in rows.all())
+
+
+def _render_user_insert(columns: list[str], values: list[str]) -> str:
+    """渲染 users 表的 INSERT：取值位与列必须一一对应，且每项自带冒号（或是 SQL 字面量）。
+
+    长度断言防的是 2026-10-31 客源录入事故：把冒号写在 ``', '.join()`` 外面只会给首列
+    加占位符，其余列退化成同表裸列名引用，MySQL 不报错但写入 NULL/列默认值。
+    """
+    if len(columns) != len(values):
+        raise ValueError(f"users INSERT 列数({len(columns)})与取值位数({len(values)})不一致")
+    return f"INSERT INTO users ({', '.join(columns)}) VALUES ({', '.join(values)})"
+
+
 async def get_or_create_user_by_phone(db: AsyncSession, phone: str, ip: str | None) -> int:
     result = await db.execute(text("SELECT id, status FROM users WHERE phone = :phone FOR UPDATE"), {"phone": phone})
     row = result.mappings().first()
@@ -323,9 +346,18 @@ async def get_or_create_user_by_phone(db: AsyncSession, phone: str, ip: str | No
         return user_id
     if not await platform_registration_open(db):
         raise HTTPException(403, detail="平台当前暂停新用户注册，请联系红娘开通后再试")
+    # 取值位逐项自带冒号（或写成 SQL 字面量）：把冒号留在 join 外面只会给首列加占位符，
+    # 其余列退化成裸列名引用，MySQL 不报错但写入的是 NULL/列默认值。
+    columns = ["phone", "phone_verified_at", "register_ip"]
+    values = [":phone", "UTC_TIMESTAMP()", ":ip"]
+    payload: dict[str, Any] = {"phone": phone, "ip": ip}
+    if "source" in await _users_columns(db):
+        columns.append("source")
+        values.append(":source")
+        payload["source"] = SOURCE_SELF_REGISTER
     result = await db.execute(
-        text("INSERT INTO users (phone, phone_verified_at, register_ip) VALUES (:phone, UTC_TIMESTAMP(), :ip)"),
-        {"phone": phone, "ip": ip},
+        text(_render_user_insert(columns, values)),
+        payload,
     )
     user_id = result.lastrowid
     await ensure_default_user_role(db, user_id)
@@ -384,7 +416,20 @@ async def login_wechat(db: AsyncSession, request: WechatLoginRequest, ip: str | 
         else:
             if not await platform_registration_open(db):
                 raise HTTPException(403, detail="平台当前暂停新用户注册，请联系红娘开通后再试")
-            result = await db.execute(text("INSERT INTO users (openid, unionid, nickname, avatar, register_ip) VALUES (:openid, :unionid, :nickname, :avatar, :ip)"), {"openid": identity["openid"], "unionid": identity.get("unionid"), "nickname": request.nickname, "avatar": request.avatar, "ip": ip})
+            columns = ["openid", "unionid", "nickname", "avatar", "register_ip"]
+            values = [":openid", ":unionid", ":nickname", ":avatar", ":ip"]
+            payload: dict[str, Any] = {
+                "openid": identity["openid"], "unionid": identity.get("unionid"),
+                "nickname": request.nickname, "avatar": request.avatar, "ip": ip,
+            }
+            if "source" in await _users_columns(db):
+                columns.append("source")
+                values.append(":source")
+                payload["source"] = SOURCE_SELF_REGISTER
+            result = await db.execute(
+                text(_render_user_insert(columns, values)),
+                payload,
+            )
             user_id, phone = result.lastrowid, None
         await ensure_default_user_role(db, user_id)
         tokens = await create_session(db, user_id, request.device_id, request.platform, request.app_version, ip, user_agent)
