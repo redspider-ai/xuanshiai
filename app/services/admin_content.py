@@ -44,6 +44,7 @@ ALLOWED_DOMAINS: frozenset[str] = frozenset(
         "free_form",
         "lovecard_batch",
         "fan_qrcode",
+        "fan_qrcode_stat",
         "gift",
         "point_gift",
         "gift_record",
@@ -150,6 +151,8 @@ EXTRA_FILTER_KEYS: frozenset[str] = frozenset(
         "gender",
         "landing_id",
         "source",
+        "qrcode_id",
+        "broadcast_id",
     }
 )
 
@@ -201,6 +204,10 @@ async def list_items(
             if key in {"group_id", "pay", "nick"} and domain != "group_signup":
                 continue
             if key in {"gender", "landing_id", "source"} and domain != "free_form":
+                continue
+            if key == "broadcast_id" and domain != "sms_send_record":
+                continue
+            if key == "qrcode_id" and domain != "fan_qrcode_stat":
                 continue
             json_key = "status" if key == "good_news_status" else key
             operator = "LIKE" if key == "nick" else "="

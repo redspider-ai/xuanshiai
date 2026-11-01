@@ -31,6 +31,8 @@ async def content_list(
     gender: str | None = Query(None, max_length=16, description="【仅 free_form】性别，取自 extra.gender：1 男 / 2 女"),
     landing_id: str | None = Query(None, max_length=32, description="【仅 free_form】落地页 ID，取自 extra.landing_id"),
     source: str | None = Query(None, max_length=64, description="【仅 free_form】客户来源，取自 extra.source，精确匹配"),
+    broadcast_id: str | None = Query(None, max_length=20, description="【仅 sms_send_record】发送明细所属群发任务 ID，取自 extra.broadcast_id"),
+    qrcode_id: str | None = Query(None, max_length=20, description="【仅 fan_qrcode_stat】统计所属二维码 ID，取自 extra.qrcode_id"),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
 ) -> ContentItemPage:
@@ -47,6 +49,8 @@ async def content_list(
         "gender": gender,
         "landing_id": landing_id,
         "source": source,
+        "broadcast_id": broadcast_id,
+        "qrcode_id": qrcode_id,
     }
     return await list_items(db, domain, page, page_size, keyword, status, extra_filters, search_type)
 
