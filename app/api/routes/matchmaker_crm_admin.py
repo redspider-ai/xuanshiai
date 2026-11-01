@@ -11,6 +11,9 @@ from app.api.dependencies import CurrentMatchmakerAdmin, get_current_matchmaker_
 from app.core.config import settings
 from app.core.sensitive_fields import mask_contact, redaction_level_from_permissions
 from app.db.session import get_db
+from app.services.region import refresh as region_refresh
+from app.services.region import registry as region_registry
+from app.services.region.types import RegionDataNotReady, RegionKind
 from app.services.sensitive_operations import (
     abort_sensitive_operation,
     begin_sensitive_operation,
@@ -65,6 +68,11 @@ class RegionResolverStatus(BaseModel):
     provider: str
     refresh_enabled: bool
     adapter_implemented: bool
+    scope: str = ""
+    affects_all: bool = False
+    ip_db_ready: bool = False
+    phone_segment_ready: bool = False
+    db_version: str | None = None
 
 
 class RegionRefreshResult(BaseModel):
@@ -74,6 +82,12 @@ class RegionRefreshResult(BaseModel):
     scanned_count: int
     updated_count: int
     adapter_implemented: bool
+    skipped_count: int = 0
+    unknown_count: int = 0
+    overwrite: bool = False
+    scope: str = ""
+    affects_all: bool = False
+    elapsed_ms: int = 0
 
 
 class MemberWechatBindingResult(BaseModel):
@@ -807,58 +821,124 @@ async def member_delete(
     return result
 
 
+def _scope_label(scope_sql: str) -> str:
+    """把作用域谓词映射为展示标签：ALL / NONE / SCOPED。
+
+    只读取谓词结果，不在路由层判断账号范围档位（四档判定唯一来源是 dependencies）。
+    """
+    if scope_sql == "1 = 1":
+        return "ALL"
+    if scope_sql == "1 = 0":
+        return "NONE"
+    return "SCOPED"
+
+
 @router.get("/members/region-resolver", response_model=RegionResolverStatus, summary="属地解析服务状态")
 async def region_resolver_status(
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
 ) -> RegionResolverStatus:
-    """A12-属地：回显 provider 与是否可刷新（不受开关影响的只读目录）。"""
+    """A12-属地：回显 provider、资源就绪度与作用域（只读目录，不写库）。"""
     current.require("matchmaker.member.read")
     provider = settings.region_resolver_provider
+    scope_params: dict[str, object] = {}
+    scope = current.scope_exists_clause(scope_params, correlation="scope_assignment.user_id = users.id")
     return RegionResolverStatus(
-        provider=provider, refresh_enabled=provider != "disabled", adapter_implemented=False
+        provider=provider,
+        refresh_enabled=provider != "disabled",
+        adapter_implemented=(
+            region_registry.adapter_implemented(RegionKind.IP)
+            or region_registry.adapter_implemented(RegionKind.PHONE)
+        ),
+        scope=_scope_label(scope),
+        affects_all=scope == "1 = 1",
+        ip_db_ready=region_registry.is_ready(RegionKind.IP),
+        phone_segment_ready=region_registry.is_ready(RegionKind.PHONE),
+        db_version=region_registry.data_version(RegionKind.IP) or region_registry.data_version(RegionKind.PHONE),
     )
 
 
 async def _refresh_region(
-    db: AsyncSession, current: CurrentMatchmakerAdmin, kind: str, idempotency_key: str
+    db: AsyncSession,
+    current: CurrentMatchmakerAdmin,
+    kind: str,
+    idempotency_key: str,
+    overwrite: bool = False,
 ) -> RegionRefreshResult:
-    """一键刷新属地：provider 门控。disabled→503、real→501（适配器待接入）、mock→干跑统计（不写库）。
+    """一键刷新属地：provider 门控 + 敏感操作幂等 + 数据作用域收口。
 
-    全项目无 IP→属地 / 号码归属地解析器（外部依赖），mock 不伪造真实地理值，仅统计候选行。
+    门控：``disabled`` → 503、``real`` → 501（在线适配器未接入）、``mock`` → 干跑
+    （仅统计候选行、不写库、恒 dry_run=True）、``offline`` → 真实解析并分批回写。
+
+    数据文件缺失不降级：抛 ``RegionDataNotReady`` 转 503，绝不把「未知」写进展示列。
+    写库 SQL 全部下沉到 ``app/services/region/refresh.py``，本函数不出现写属地列的语句。
     """
     provider = settings.region_resolver_provider
     if provider == "disabled":
         raise HTTPException(503, detail="属地解析服务未接入（厂商未配置）")
     if provider == "real":
         raise HTTPException(501, detail="属地解析适配器待接入")
+
+    region_kind = RegionKind(kind)
+    params: dict[str, object] = {}
+    scope = current.scope_exists_clause(params, correlation="scope_assignment.user_id = users.id")
     reservation, replayed = await begin_sensitive_operation(
         db,
         actor_id=current.account.id,
         operation=f"matchmaker.member.refresh_{kind}_region",
         idempotency_key=idempotency_key,
-        payload={"kind": kind},
+        payload={"kind": kind, "overwrite": overwrite},
     )
     if replayed is not None:
         return RegionRefreshResult(**replayed)
     try:
-        available = await _available_columns(db)
-        source_col = "register_ip" if kind == "ip" else "phone"
-        params: dict[str, object] = {}
-        scope = current.scope_exists_clause(params, correlation="scope_assignment.user_id = users.id")
-        deleted_guard = " AND users.deleted_at IS NULL" if ("users", "deleted_at") in available else ""
-        source_guard = (
-            f" AND users.{source_col} IS NOT NULL AND users.{source_col} <> ''"
-            if ("users", source_col) in available else ""
-        )
-        scanned = int((await db.execute(text(
-            f"SELECT COUNT(*) FROM users WHERE ({scope}){deleted_guard}{source_guard}"), params)).scalar() or 0)
+        if provider == "mock":
+            scanned = await region_refresh.count_candidates(
+                db, kind=region_kind, scope_sql=scope, params=params, include_empty_only=not overwrite
+            )
+            stats = region_refresh.RefreshStats(scanned=scanned)
+        else:
+            stats = await region_refresh.refresh(
+                db,
+                kind=region_kind,
+                scope_sql=scope,
+                params=params,
+                batch_size=settings.region_refresh_batch_size,
+                overwrite=overwrite,
+                max_overwrite_rows=settings.region_refresh_overwrite_max_rows,
+            )
+            await region_refresh.write_audit(
+                db,
+                actor_id=current.account.id,
+                kind=region_kind,
+                stats=stats,
+                overwrite=overwrite,
+                scope_label=_scope_label(scope),
+            )
+    except RegionDataNotReady as exc:
+        # 资源未就绪（库文件/号段表/绑定缺失）属「能力未开放」，不是请求错误。
+        await abort_sensitive_operation(db, reservation)
+        raise HTTPException(503, detail=str(exc)) from exc
+    except region_refresh.OverwriteTooLarge as exc:
+        await abort_sensitive_operation(db, reservation)
+        raise HTTPException(409, detail=str(exc)) from exc
     except Exception:
-        # 与 batch/single delete 同口径：干跑统计失败必须释放预占行，否则同键 5 分钟内被锁死 409。
+        # 与 batch/single delete 同口径：失败必须释放预占行，否则同键 5 分钟内被锁死 409。
         await abort_sensitive_operation(db, reservation)
         raise
+
     result = RegionRefreshResult(
-        kind=kind, provider=provider, dry_run=True, scanned_count=scanned,
-        updated_count=0, adapter_implemented=False,
+        kind=kind,
+        provider=provider,
+        dry_run=provider == "mock",
+        scanned_count=stats.scanned,
+        updated_count=stats.updated,
+        skipped_count=stats.skipped,
+        unknown_count=stats.unknown,
+        overwrite=overwrite,
+        scope=_scope_label(scope),
+        affects_all=scope == "1 = 1",
+        adapter_implemented=region_registry.adapter_implemented(region_kind),
+        elapsed_ms=stats.elapsed_ms,
     )
     await finish_sensitive_operation(db, reservation, result.model_dump(mode="json"))
     return result
@@ -869,9 +949,10 @@ async def refresh_ip_region(
     idempotency_key: str = Depends(require_sensitive_operation),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
+    overwrite: bool = Query(False, description="是否覆盖已有属地（默认只填空）"),
 ) -> RegionRefreshResult:
     current.require("matchmaker.member.manage")
-    return await _refresh_region(db, current, "ip", idempotency_key)
+    return await _refresh_region(db, current, "ip", idempotency_key, overwrite)
 
 
 @router.post("/members/refresh-phone-region", response_model=RegionRefreshResult, summary="一键刷新手机属地（敏感，provider 门控）")
@@ -879,9 +960,10 @@ async def refresh_phone_region(
     idempotency_key: str = Depends(require_sensitive_operation),
     current: CurrentMatchmakerAdmin = Depends(get_current_matchmaker_admin),
     db: AsyncSession = Depends(get_db),
+    overwrite: bool = Query(False, description="是否覆盖已有属地（默认只填空）"),
 ) -> RegionRefreshResult:
     current.require("matchmaker.member.manage")
-    return await _refresh_region(db, current, "phone", idempotency_key)
+    return await _refresh_region(db, current, "phone", idempotency_key, overwrite)
 
 
 def _wechat_columns_ok(available: frozenset[tuple[str, str]]) -> None:

@@ -149,8 +149,18 @@ class Settings(BaseSettings):
 
     # 属地解析（A12-一键刷新 IP/手机属地）：全项目当前无 IP→属地 / 号码归属地解析器（外部依赖）。
     # disabled（默认）→ 刷新接口 503；mock → 干跑（只统计候选行、不写库，adapter_implemented=false）；
-    # real → 预留（适配器未接入时返回 501）。预发/生产禁止 mock。
-    region_resolver_provider: Literal["disabled", "mock", "real"] = "disabled"
+    # offline → 离线解析（IP 用 ip2region 市级、手机用号段表）并写库；
+    # real → 预留（在线适配器未接入时返回 501）。预发/生产禁止 mock。
+    region_resolver_provider: Literal["disabled", "mock", "offline", "real"] = "disabled"
+    # 离线解析资产（provider=offline 时使用）。缺失一律 503，不写库、不兜底：
+    # 把「未知」写进展示列比留空更有害。
+    region_ip_db_path: str | None = None
+    region_ip_v6_db_path: str | None = None
+    # 城市字段下标（按「过滤掉空段与 0 段后的位置」计）：开源 3.x 为 2，商用满载版为 3。
+    region_ip_city_index: int = 2
+    region_phone_segment_path: str | None = None
+    region_refresh_batch_size: int = 500
+    region_refresh_overwrite_max_rows: int = 5000
 
     # AI avatar calls an OpenAI-compatible chat-completions service from the
     # backend only. API keys must never be exposed to the mini-program.

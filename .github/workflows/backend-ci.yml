@@ -107,6 +107,9 @@ jobs:
           app/api/routes/activity_admin.py app/api/routes/customer_leads_admin.py
           app/api/routes/matchmaker_crm_admin.py app/api/routes/matchmaker_member_admin.py
           app/core/sensitive_fields.py app/services/community.py
+          app/services/region/__init__.py app/services/region/types.py
+          app/services/region/ip_offline.py app/services/region/phone_offline.py
+          app/services/region/registry.py app/services/region/refresh.py
           app/services/customer_lead_admin.py app/services/finance.py
           app/services/idempotency.py app/services/matchmaker_member_admin.py
           app/services/message_admin.py
@@ -140,7 +143,8 @@ jobs:
           tests/test_payment_callback_verification.py
           tests/test_permission_code_seed_coverage.py
           tests/test_realname_face_unification.py
-          tests/test_refund_membership_revoke.py -q
+          tests/test_refund_membership_revoke.py
+          tests/test_region_refresh_20261101.py -q
 
   # 画像会话契约（master 活动槽抢占与复用、会话状态终态守卫、journey/start 响应
   # 字段）：全部为不依赖 DB 的内存假库单元契约。test_master_session.py 与

@@ -74,3 +74,6 @@ uvicorn.out.log
 
 # 工作区数据与记忆（本地数据，不纳入版本控制）
 .workbuddy/
+
+# 属地解析数据资产：IP 库约 11MB（商用版 266MB），随部署下发并记录 sha256，不进仓库
+data/region/*.xdb
